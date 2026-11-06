@@ -1,0 +1,59 @@
+# Default StemFX training configuration (paper main).
+#
+# All paths must be set per environment via CLI overrides, e.g.:
+#   python train.py --config configs/default.yaml \
+#       data.original_path=/path/to/fma_separated \
+#       data.augmented_path=/path/to/fma_separated_augmented \
+#       train.checkpoint_dir=checkpoints/stemfx \
+#       train.log_dir=logs/stemfx
+#
+# CLI dotted overrides take precedence over the YAML file.
+
+data:
+  original_path: null            # REQUIRED. Sep-Aug pipeline output (see pipeline/preprocess_fma.py)
+  augmented_path: null           # REQUIRED. Sep-Aug pipeline output (see pipeline/augment_stems.py)
+  valid_tracks_path: null        # Optional. Used when mix_stems=true.
+  clip_duration: 10.0            # 10 s segments — the encoder is trained at this length.
+  sample_rate: 44100
+  max_seq_len: 512
+  val_split: 0.05
+  num_workers: 8
+  scroll_prob: 0.5
+  same_segment: false
+  use_ffmpeg: false
+  mix_stems: true                # Cross-song stem mixing (Sep-Aug paper recipe).
+  max_samples: null
+
+model:
+  encoder_dim: 512
+  feature_dim: 64
+  n_mels: 80
+  n_fft: 2048
+  hop_length: 512
+  use_film: true
+  encoder_backbone: cnn          # Paper main: CNN backbone with FiLM.
+  hidden_dim: 512
+  num_layers: 6
+  num_heads: 8
+  feedforward_dim: 2048
+  dropout: 0.1
+  num_memory_tokens: 4
+
+train:
+  batch_size: 32
+  num_epochs: 50
+  learning_rate: 1.0e-4
+  encoder_lr_multiplier: 1.0
+  weight_decay: 0.01
+  clip_grad_norm: 1.0
+  warmup_steps: 1000
+  gradient_accumulation_steps: 1
+  lambda_mse: 20.0
+  no_value_head: true            # Paper main: no separate value head (CE on all tokens).
+  log_dir: logs/stemfx
+  checkpoint_dir: checkpoints/stemfx
+  log_interval: 50
+  save_interval: 5
+  device: cuda:0
+  resume: null                   # Path to a .pt checkpoint to resume from.
+  seed: 42

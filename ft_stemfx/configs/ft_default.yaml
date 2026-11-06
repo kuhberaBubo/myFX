@@ -1,0 +1,47 @@
+# Fine-tune pretrained StemFX on Guitar Rig pairs (dataset/run_20k).
+#
+#   python ft_stemfx/train.py --config ft_stemfx/configs/ft_default.yaml \
+#       data.root=/content/dataset/run_20k \
+#       train.checkpoint_dir=/content/drive/MyDrive/myFX/ckpt/ft_v1 \
+#       train.log_dir=/content/drive/MyDrive/myFX/logs/ft_v1
+#
+# Dotted CLI overrides take precedence over this file.
+
+data:
+  root: null                  # REQUIRED. folder containing train.jsonl / val.jsonl / param_info/
+  train_file: train.jsonl
+  val_file: val.jsonl
+  sample_rate: 44100
+  clip_start_sec: 0.0         # 15 s clips: play 0-10 s, silent tail 10-15 s
+  clip_duration: 10.0         # encoder was trained on 10 s
+  dummy_level_db: -60.0       # RMS of the dummy vocals/bass/drums noise (must not be silence)
+  max_seq_len: 512            # keep 512: positional-encoding buffer is in the checkpoint
+  num_workers: 2              # Colab: 2
+  max_train_samples: null     # e.g. 200 for a quick test
+  max_val_samples: null
+  skip_missing_audio: false   # true for local smoke tests on a partial copy
+
+model:
+  pretrained_checkpoint: null # null -> download paper checkpoint (barry-mir/stemfx-bsfilm)
+  dropout: 0.1
+
+train:
+  batch_size: 16
+  num_epochs: 30
+  learning_rate: 1.0e-4
+  encoder_lr_multiplier: 0.1  # used once the encoder is unfrozen
+  freeze_encoder: true        # stage 1: decoder only
+  unfreeze_at_epoch: null     # e.g. 11 -> stage 2 from epoch 11 (null = frozen throughout)
+  weight_decay: 0.01
+  clip_grad_norm: 1.0
+  warmup_steps: 500
+  gradient_accumulation_steps: 1
+  lambda_mse: 20.0
+  no_value_head: true         # same as the paper checkpoint: CE over all tokens incl. VALUE bins
+  log_dir: logs/ft_stemfx
+  checkpoint_dir: checkpoints/ft_stemfx
+  log_interval: 50
+  save_interval: 5            # numbered snapshots; latest/best are written every epoch
+  device: cuda
+  resume: auto                # auto | null | path/to/checkpoint.pt
+  seed: 42

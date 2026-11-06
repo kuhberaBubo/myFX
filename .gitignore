@@ -1,0 +1,17 @@
+# data goes to Google Drive as dataset.zip, not git
+dataset/
+*.zip
+
+# training outputs
+checkpoints/
+logs/
+*.pt
+*.ckpt
+
+# python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+
+a/

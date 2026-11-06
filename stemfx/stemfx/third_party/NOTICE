@@ -1,0 +1,29 @@
+This directory contains third-party source code redistributed with StemFX.
+
+--------------------------------------------------------------------------
+Music-Source-Separation-Training (SCNet)
+--------------------------------------------------------------------------
+
+Files:
+    stemfx/third_party/scnet/scnet_masked.py
+    stemfx/third_party/scnet/separation.py
+    stemfx/third_party/configs/config_musdb18_scnet_xl_ihf.yaml
+
+Source:
+    https://github.com/ZFTurbo/Music-Source-Separation-Training
+
+Copyright (c) 2024 Roman Solovyev (ZFTurbo)
+Licensed under the MIT License. The full license text is in LICENSE.msst.
+
+The model source files are redistributed verbatim. The configuration file is
+taken unmodified from release v1.0.17.
+
+Pretrained SCNet weights are NOT redistributed with StemFX. They are
+downloaded at runtime from the upstream project's own GitHub release:
+
+    https://github.com/ZFTurbo/Music-Source-Separation-Training/releases/
+        download/v1.0.17/model_scnet_masked_ep_111_sdr_9.8286.ckpt
+
+Those weights are the property of their original author and are subject to
+whatever terms that project applies to them. StemFX only points at the
+upstream artifact; it does not mirror or relicense it.
