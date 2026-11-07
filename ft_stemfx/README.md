@@ -15,6 +15,7 @@ myFX/
    ├─ train.py             학습 (encoder freeze 단계, resume=auto)
    ├─ evaluate.py          greedy 생성 → 체인(이펙트+순서) 일치, 노브 오차
    ├─ infer.py             (DI, 처리된 소리) → 체인 JSON. CPU 가능
+   ├─ render_eval.py       예측 체인을 rigkit으로 다시 렌더 → target과 소리 비교
    ├─ configs/ft_default.yaml
    └─ colab_ft.ipynb
 ```
@@ -69,6 +70,25 @@ python ft_stemfx/infer.py --ckpt best_model.pt --di di.wav --wet wet.wav --offse
 - 출력: `chain`(순서대로 이펙트 + 파라미터), `values`(dataset/rigkit `values` 형식, 모델이 안 낸 파라미터는 프리셋 기본값으로 채우고 `source:"default"`), `renderable_presets`(이 체인을 rigkit으로 다시 렌더할 수 있는 프리셋).
 - 속도: 4스레드 CPU에서 한 쌍당 약 4초 (encoder 0.4 s + 최대 길이 생성 3.6 s). 모델 28M 파라미터.
 - dataset 폴더 없이 동작 (param_info가 체크포인트에 들어 있음).
+
+## 다시 렌더해서 비교 (`render_eval.py`)
+예측한 체인을 rigkit으로 같은 입력 클립에 렌더해서 target과 소리가 얼마나 다른지 잰다. 체인/순서/노브 지표도 함께 낸다.
+```bash
+# 데스크톱 (Guitar Rig 7 + ps1~8 프리셋 + 전체 dataset)
+$env:RIGKIT_PROJECT = "C:\...\GuitarRig Vst Code"     # rigkit 설정/프리셋 위치 (myFX에서 실행하므로 필요)
+python ft_stemfx/render_eval.py all --ckpt best_model.pt --root <dataset>/run_20k --out eval_render --n 100
+```
+- 단계별로도 실행 가능: `predict`(torch, CPU 가능) → `render`(rigkit 필요) → `score`(numpy만). 끊기면 같은 명령으로 이어서.
+- 샘플마다 렌더: `pred` 예측 체인, `rand` 다른 val 샘플의 체인(오디오를 안 보는 기준선), `gt` 정답 체인 재렌더(앞 5개, target과 거의 같아야 정상).
+- 예측 체인 → 플러그인 설정: 원래 프리셋이 예측 순서를 표현할 수 있으면 그 프리셋, 아니면 표현 가능한 다른 프리셋,
+  둘 다 안 되면 원래 프리셋에서 있는 이펙트만 켬(`forced`). 매번 프리셋을 다시 불러온 뒤 params.toml 고정값 → on/off → 예측 노브 raw.
+  모델이 안 낸 노브는 프리셋 저장값.
+- 오디오 지표 (target 대비, 15 s 전체): `mrstft` 다중 해상도 STFT 거리, `band_db` 1/3옥타브 장기 스펙트럼 dB 차(톤),
+  `rms_db` 레벨 차, `win_rand` pred가 rand보다 가까운 비율. `di_*`는 이펙트 없는 DI와의 거리(참고).
+- 결과: `summary.json`, `scores.csv`(샘플별), `audio/<id>_{pred,rand,gt}.flac`(target은 dataset의 `targets/`).
+- **듣기 페이지** `listen.html` (`all`의 마지막 단계, 따로는 `listen --k 5`): 샘플마다 원본 DI / target / 예측 렌더 플레이어,
+  정답·예측 체인 비교(빠진 이펙트 / 추가된 이펙트 표시), 노브별 정답·예측·오차 표. 기본 5개를 소리 거리 기준으로
+  잘 맞춘 것부터 못 맞춘 것까지 고르게 뽑음(`--pick spread|random|first`). 오디오는 `listen/`에 복사돼서 폴더째 옮겨도 열림.
 
 ## 지표
 - 학습 중 (teacher forcing): `acc_cat` 토큰(이펙트/파라미터 이름) 정확도, `mae_val` VALUE 위치의 bin 오차/100 ≈ 노브 평균 오차.

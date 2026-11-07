@@ -8,6 +8,12 @@ logs/
 *.pt
 *.ckpt
 
+# evaluation / inference outputs (render_eval.py, infer.py)
+eval_render*/
+pred*.json
+*.flac
+*.wav
+
 # python
 __pycache__/
 *.pyc
