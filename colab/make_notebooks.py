@@ -160,12 +160,22 @@ def status(names=None):
               f"{s['val']['mae_val']:8.4f} {s['baseline_mae']:6.3f} {s['epoch_sec']/60:7.1f}  {state}")
 
 N_EVAL, EVAL_SEED = 100, 0      # 모든 모델이 같은 val 100개를 예측 (바꾸지 말 것)
-def predict(name, device="cuda"):
+def predict(name, device="cuda", value_decode="median"):
+    """median (기본): 노브 = 예측 분포의 중앙값 -> eval/<name>/
+       argmax: 가장 확률 높은 칸 (StemFX 원래 방식) -> eval/<name>_argmax/"""
     ck = f"{ckpt_dir(name)}/best_model.pt"
     if not os.path.isfile(ck):
         print("skip (no best_model.pt):", name); return False
+    out = eval_dir(name) if value_decode == "median" else eval_dir(f"{name}_argmax")
+    # 예전(argmax) 예측이 eval/<name>/에 있으면 eval/<name>_argmax/로 옮김
+    legacy = eval_dir(name)
+    if (os.path.isfile(f"{legacy}/preds.jsonl") and not os.path.isfile(f"{legacy}/predict_meta.json")
+            and not os.path.exists(eval_dir(f"{name}_argmax"))):
+        shutil.move(legacy, eval_dir(f"{name}_argmax"))
+        print(f"moved old argmax predictions -> {eval_dir(name + '_argmax')}")
     get_ipython().system(f"python {CODE_DIR}/ft_stemfx/render_eval.py predict --ckpt {ck} --root {DATA_ROOT} "
-                         f"--out {eval_dir(name)} --n {N_EVAL} --seed {EVAL_SEED} --device {device} --batch-size 16")
+                         f"--out {out} --n {N_EVAL} --seed {EVAL_SEED} --device {device} --batch-size 16 "
+                         f"--value-decode {value_decode}")
     return True
 '''
 
@@ -229,9 +239,14 @@ status([NAME])
     nb.md(f'''
 ### 3) 평가용 예측 (GPU, 몇 분)
 `best_model.pt`로 공통 val 100개(seed 0)의 체인을 예측 → Drive `eval/{name}/preds.jsonl`.
+노브 값은 예측 분포의 **중앙값**(기본, `eval/{name}/`)과 가장 확률 높은 칸(`argmax`, StemFX 원래 방식,
+`eval/{name}_argmax/`) 두 가지로 예측해서 비교할 수 있게 함. 이미 한 샘플은 건너뜀.
 렌더 없이 체인·노브 지표만 먼저 보려면 다음 셀 `score`. 소리 비교는 데스크톱에서 렌더한 뒤.
 ''')
-    nb.code("predict(NAME)")
+    nb.code('''
+predict(NAME)                          # 노브 = 분포의 중앙값 -> eval/NAME/
+predict(NAME, value_decode="argmax")   # 노브 = 가장 확률 높은 칸 -> eval/NAME_argmax/
+''')
     nb.code('''
 get_ipython().system(f"python {CODE_DIR}/ft_stemfx/render_eval.py score --root {DATA_ROOT} --out {eval_dir(NAME)} | tail -n 3")
 s = json.load(open(f"{eval_dir(NAME)}/summary.json"))
@@ -274,23 +289,24 @@ status(RUNS)
 ''')
     nb.md('''
 ### 2) 예측 + 점수 (빠진 것만)
-이미 `preds.jsonl`이 100개 있으면 건너뜀. 학습이 이어져서 `best_model.pt`가 바뀌었으면 `REDO`에 이름을 넣어 다시 예측.
+이미 예측한 샘플은 건너뜀. 학습이 이어져서 `best_model.pt`가 바뀌었으면 `REDO`에 이름을 넣어 다시 예측.
+노브는 중앙값으로 고른 결과가 기본. `ARGMAX`에 넣은 실험은 가장 확률 높은 칸으로 고른 결과(`<이름>_argmax`)도 표에 같이 넣음.
 ''')
     nb.code('''
 import torch
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-REDO = []          # 예: ["tfx_g"]
-def n_preds(name):
-    p = f"{eval_dir(name)}/preds.jsonl"
-    return sum(1 for l in open(p, encoding="utf-8") if l.strip()) if os.path.isfile(p) else 0
+REDO = []                        # 예: ["tfx_g"]
+ARGMAX = ["ft_v1", "ft_frozen"]  # argmax 결과도 같이 비교할 실험
 ready = []
 for name in RUNS:
     if name in REDO:
-        shutil.rmtree(eval_dir(name), ignore_errors=True)
-    if n_preds(name) < N_EVAL and not predict(name, DEVICE):
-        continue
-    get_ipython().system(f"python {CODE_DIR}/ft_stemfx/render_eval.py score --root {DATA_ROOT} --out {eval_dir(name)} > /dev/null")
-    ready.append(name)
+        for d in (eval_dir(name), eval_dir(name + "_argmax")):
+            shutil.rmtree(d, ignore_errors=True)
+    for mode, run in [("median", name)] + ([("argmax", name + "_argmax")] if name in ARGMAX else []):
+        if not predict(name, DEVICE, mode):
+            break
+        get_ipython().system(f"python {CODE_DIR}/ft_stemfx/render_eval.py score --root {DATA_ROOT} --out {eval_dir(run)} > /dev/null")
+        ready.append(run)
 print("ready:", ready)
 ''')
     nb.md('''
@@ -312,7 +328,7 @@ Drive의 `26_Research/myFX/eval/` 폴더를 데스크톱 `myFX/eval_render/`로 
 ```powershell
 $env:RIGKIT_PROJECT = "C:\...\GuitarRig Vst Code"
 $D = "<dataset>/run_20k"
-$RUNS = "ft_v1","ft_frozen","ft_full","tfx_g","tfx_mert"
+$RUNS = "ft_v1","ft_frozen","ft_full","tfx_g","tfx_mert","ft_v1_argmax","ft_frozen_argmax"
 foreach ($e in $RUNS) {
   python ft_stemfx/render_eval.py render --root $D --out eval_render/$e
   python ft_stemfx/render_eval.py score  --root $D --out eval_render/$e

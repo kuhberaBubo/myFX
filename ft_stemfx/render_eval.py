@@ -107,12 +107,21 @@ def cmd_predict(a) -> None:
     from load_pretrained import build_model
     from rig_dataset import RigPairDataset, make_loader
     from rig_tokenizer import RigTokenizer
+    from value_decode import greedy_decode, stemfx_memory
 
     if a.threads:
         torch.set_num_threads(a.threads)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     root = Path(a.root)
+    meta_p = out / "predict_meta.json"
+    old = (json.loads(meta_p.read_text(encoding="utf-8")) if meta_p.is_file()
+           else {"value_decode": "argmax"} if (out / PREDS).is_file() else None)
+    if old and old.get("value_decode") != a.value_decode:
+        raise SystemExit(f"{out} already holds predictions with value_decode={old.get('value_decode')}; "
+                         f"use another --out for {a.value_decode}")
+    meta_p.write_text(json.dumps({"value_decode": a.value_decode, "ckpt": str(a.ckpt),
+                                  "n": a.n, "seed": a.seed}, indent=1), encoding="utf-8")
 
     ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
     dc = ck["config"]["data"]
@@ -127,8 +136,8 @@ def cmd_predict(a) -> None:
                          skip_missing_audio=a.skip_missing_audio)
 
         def generate(batch):
-            return model.generate(batch["dry"].to(a.device), batch["wet"].to(a.device),
-                                  dc["max_seq_len"], tok.bos_token_idx, tok.eos_token_idx)
+            mem = model.memory(batch["dry"].to(a.device), batch["wet"].to(a.device))
+            return greedy_decode(model.decoder, mem, tok, dc["max_seq_len"], a.value_decode)
         loader_fn = tfx_loader
     else:                                                   # ft_stemfx (StemFX 4-stem)
         tok = RigTokenizer.from_checkpoint(ck["tokenizer"])
@@ -144,9 +153,8 @@ def cmd_predict(a) -> None:
         def generate(batch):
             orig = {k: v.to(a.device) for k, v in batch["original_stems"].items()}
             aug = {k: v.to(a.device) for k, v in batch["augmented_stems"].items()}
-            return model.generate(orig, aug, max_length=dc["max_seq_len"],
-                                  bos_token_idx=tok.bos_token_idx,
-                                  eos_token_idx=tok.eos_token_idx, top_k=1, top_p=1.0)[0]
+            return greedy_decode(model.generator, stemfx_memory(model, orig, aug), tok,
+                                 dc["max_seq_len"], a.value_decode)
         loader_fn = make_loader
     del ck
 
@@ -792,6 +800,9 @@ def main():
         p.add_argument("--device", default="cpu")
         p.add_argument("--threads", type=int, default=0)
         p.add_argument("--skip-missing-audio", action="store_true")
+        p.add_argument("--value-decode", choices=("argmax", "median"), default="median",
+                       help="knob values: median of the predicted bin distribution (default) or "
+                            "the most likely bin (= StemFX greedy). Different modes need different --out")
 
     def render_args(p):
         p.add_argument("--check-gt", type=int, default=5,

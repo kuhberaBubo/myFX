@@ -92,6 +92,7 @@ python ft_stemfx/render_eval.py all --ckpt best_model.pt --root <dataset>/run_20
   `rms_db` 레벨 차, `win_rand` pred가 rand보다 가까운 비율. `di_*`는 이펙트 없는 DI와의 거리(참고).
 - 결과: `summary.json`, `scores.csv`(샘플별), `audio/<id>_{pred,rand,gt}.flac`(target은 dataset의 `targets/`).
 - `summary.json`의 `per_effect`: 이펙트별 켜짐 precision/recall/F1, 노브 MAE와 같은 노브의 오디오 없는 기준선(train 중앙값).
+- `predict --value-decode median`(기본): 연속 노브는 예측한 101칸 분포의 중앙값으로 고름 (`value_decode.py`). `argmax`는 가장 확률 높은 칸(StemFX 원래 방식). 모드마다 `--out`을 따로.
 - testFX 체크포인트도 그대로 넣으면 됨 (`model_kind`로 구분). GPU에서 `predict`만 하고 데스크톱에서 `render`부터 이어서 해도 됨.
 - **모델 비교** `compare --runs ft_v1=eval_render/ft_v1 ft_full=eval_render/ft_full ...`: 같은 샘플 기준으로
   `compare.md`(전체 / 이펙트별 / 모델 간 승률 표), `compare.html`(DI · target · 모델별 예측을 한 카드에서 듣기).
