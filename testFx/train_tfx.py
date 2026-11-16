@@ -44,6 +44,7 @@ def _load_ft_train():
 FT = _load_ft_train()   # helpers: load_config, save_ckpt, amp_context, baselines
 from stemfx.losses import FXChainLoss    # noqa: E402
 from tfx_data import PairDataset, make_loader  # noqa: E402
+from tfx_losses import KnobAwareChainLoss  # noqa: E402
 
 
 def n_params(ps):
@@ -69,7 +70,7 @@ def run_epoch(model, loader, criterion, tok, device, cfg, train, optim_=None, sc
                 logits, vpred = model(dry, wet, tokens)
             logits, vpred = logits.float(), vpred.float()
             vmask = b["value_mask"].to(device)
-            loss, _ = criterion(logits, vpred, tokens, b["values"].to(device), vmask)
+            loss, parts = criterion(logits, vpred, tokens, b["values"].to(device), vmask)
         if train:
             (loss / accum).backward()
             if (i + 1) % accum == 0:
@@ -85,6 +86,9 @@ def run_epoch(model, loader, criterion, tok, device, cfg, train, optim_=None, sc
         sums["acc_cat"] += acc["categorical"]
         sums["acc_val"] += acc["value"]
         sums["mae_val"] += mae
+        for k in ("ce_hard", "emd"):          # KnobAwareChainLoss only
+            if k in parts:
+                sums[k] = sums.get(k, 0.0) + float(parts[k])
         n += 1
         if train:
             if i % tc["log_interval"] == 0:
@@ -149,10 +153,18 @@ def main(argv=None):
         optim_, lambda s: s / max(warm, 1) if s < warm
         else 0.5 * (1 + math.cos(math.pi * min((s - warm) / max(total - warm, 1), 1.0))))
 
-    criterion = FXChainLoss(pad_token_idx=tok.pad_token_idx,
-                            value_token_start=tok.value_token_start,
-                            value_token_end=tok.value_token_end,
-                            lambda_mse=tc["lambda_mse"], no_value_head=tc["no_value_head"])
+    sigma, emd_w = float(tc.get("value_sigma") or 0), float(tc.get("value_emd_weight") or 0)
+    if sigma > 0 or emd_w > 0:
+        if not tc["no_value_head"]:
+            raise SystemExit("value_sigma / value_emd_weight need no_value_head: true")
+        criterion = KnobAwareChainLoss(tok, sigma, emd_w).to(device)
+        print(f"knob-aware loss: soft VALUE targets sigma={sigma} bins, EMD weight {emd_w} "
+              f"(ce_hard = plain CE, comparable to other runs)")
+    else:
+        criterion = FXChainLoss(pad_token_idx=tok.pad_token_idx,
+                                value_token_start=tok.value_token_start,
+                                value_token_end=tok.value_token_end,
+                                lambda_mse=tc["lambda_mse"], no_value_head=tc["no_value_head"])
 
     start_epoch, step, best_val, bad_epochs = 1, 0, float("inf"), 0
     if ck is not None:

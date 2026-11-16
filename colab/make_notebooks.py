@@ -1,6 +1,6 @@
 """Generate the Colab notebooks in this folder (edit here, then `python colab/make_notebooks.py`).
 
-1_ft_frozen / 2_ft_full / 3_tfx_g / 4_tfx_mert : one experiment each (setup -> quick test -> train -> predict)
+1_ft_frozen / 2_ft_full / 3_tfx_g / 4_tfx_mert / 6_tfx_g_soft : one experiment each (setup -> quick test -> train -> predict)
 5_compare                                      : status of all runs, predict missing, tables + listening page
 All write to the same Drive layout, so the compare notebook (and the desktop) just reads it:
     DRIVE_ROOT (= 26_Research/myFX)/ckpt/<exp>/   checkpoints (best_model.pt = inference)
@@ -26,8 +26,11 @@ EXPERIMENTS = {
     "tfx_mert": ("testFx/train_tfx.py", "testFx/configs/tfx_mert.yaml",
                  "testFX-MERT: MERT-v1-95M 위 4층만 학습, 디코더는 StemFX에서 가져옴",
                  "첫 실행 때 MERT(약 380MB)를 내려받음. 체크포인트가 ~1GB라 latest/best만 저장."),
+    "tfx_g_soft": ("testFx/train_tfx.py", "testFx/configs/tfx_g_soft.yaml",
+                   "tfx_g + 노브 loss 개선 (주변 칸에도 점수: 가우시안 soft label σ=2칸 + EMD 거리 벌점)",
+                   "tfx_g와 loss만 다름 -> tfx_g와 비교. 로그의 `ce_hard`가 다른 실험의 loss와 같은 기준."),
 }
-ORDER = ["ft_frozen", "ft_full", "tfx_g", "tfx_mert"]
+ORDER = {"ft_frozen": 1, "ft_full": 2, "tfx_g": 3, "tfx_mert": 4, "tfx_g_soft": 6}   # 5 = compare
 
 
 class NB:
@@ -72,6 +75,7 @@ EXPERIMENTS = {
     "ft_full":   ("ft_stemfx/train.py", "ft_stemfx/configs/ft_full.yaml"),
     "tfx_g":     ("testFx/train_tfx.py", "testFx/configs/tfx_g.yaml"),
     "tfx_mert":  ("testFx/train_tfx.py", "testFx/configs/tfx_mert.yaml"),
+    "tfx_g_soft": ("testFx/train_tfx.py", "testFx/configs/tfx_g_soft.yaml"),
 }
 def ckpt_dir(name):
     new, old = f"{DRIVE_ROOT}/ckpt/{name}", OLD_CKPT.get(name)
@@ -280,7 +284,7 @@ def compare():
 `RUNS`: 비교할 실험. `ft_v1` = 지난번 결과 (encoder 고정 13 epoch, early stop 없음).
 ''')
     nb.code('''
-RUNS = ["ft_v1", "ft_frozen", "ft_full", "tfx_g", "tfx_mert"]
+RUNS = ["ft_v1", "ft_frozen", "ft_full", "tfx_g", "tfx_mert", "tfx_g_soft"]
 status(RUNS)
 ''')
     nb.code('''
@@ -296,7 +300,7 @@ status(RUNS)
 import torch
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 REDO = []                        # 예: ["tfx_g"]
-ARGMAX = ["ft_v1", "ft_frozen"]  # argmax 결과도 같이 비교할 실험
+ARGMAX = list(RUNS)              # argmax 결과도 같이 비교할 실험 (공정 비교: 전부)
 ready = []
 for name in RUNS:
     if name in REDO:
@@ -328,7 +332,8 @@ Drive의 `26_Research/myFX/eval/` 폴더를 데스크톱 `myFX/eval_render/`로 
 ```powershell
 $env:RIGKIT_PROJECT = "C:\...\GuitarRig Vst Code"
 $D = "<dataset>/run_20k"
-$RUNS = "ft_v1","ft_frozen","ft_full","tfx_g","tfx_mert","ft_v1_argmax","ft_frozen_argmax"
+$BASE = "ft_v1","ft_frozen","ft_full","tfx_g","tfx_mert","tfx_g_soft"
+$RUNS = $BASE + ($BASE | ForEach-Object { "${_}_argmax" })
 foreach ($e in $RUNS) {
   python ft_stemfx/render_eval.py render --root $D --out eval_render/$e
   python ft_stemfx/render_eval.py score  --root $D --out eval_render/$e
@@ -344,6 +349,6 @@ python ft_stemfx/render_eval.py compare --root $D --out eval_render/compare --k 
 
 
 if __name__ == "__main__":
-    for i, name in enumerate(ORDER, 1):
+    for name, i in ORDER.items():
         experiment(i, name)
     compare()
