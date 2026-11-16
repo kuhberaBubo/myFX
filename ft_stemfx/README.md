@@ -46,6 +46,11 @@ python ft_stemfx/train.py --config ft_stemfx/configs/ft_default.yaml \
 
 python ft_stemfx/evaluate.py --ckpt <ckpt_dir>/best_checkpoint.pt --root <data.root> --max-samples 300
 ```
+- 실험 config: `configs/ft_frozen.yaml`(인코더 고정 + 임베딩 캐시 + early stop), `configs/ft_full.yaml`(인코더 처음부터 학습 + early stop).
+  Colab은 `colab/` 폴더: 실험마다 노트북 하나(`1_ft_frozen` ~ `4_tfx_mert`) + 모아서 비교하는 `5_compare`.
+- `train.cache_embeddings=true`(인코더를 끝까지 고정할 때만): 인코더 출력을 한 번 계산해 `emb_cache_{train,val}.pt`로 저장하고 디코더만 학습 → epoch당 수 초.
+- `train.amp=auto`: bf16 지원 GPU(L4/A100)에서 autocast. `train.early_stop_patience=N`: val `best_metric`(기본 loss)이 N epoch 동안 안 좋아지면 종료 (resume해도 카운트 유지).
+- 매 epoch 오디오 없이 찍는 기준선(`baseline mae`, 파라미터별 train 중앙값)을 같이 출력. `log_dir/status.json`에 진행 상태.
 - `train.resume=auto`(기본): `checkpoint_dir/latest_checkpoint.pt`가 있으면 이어서 학습.
 - `train.freeze_encoder=true`(기본): decoder만 학습. `train.unfreeze_at_epoch=N`이면 N epoch부터 encoder도
   `learning_rate × encoder_lr_multiplier`로 학습.
@@ -86,6 +91,10 @@ python ft_stemfx/render_eval.py all --ckpt best_model.pt --root <dataset>/run_20
 - 오디오 지표 (target 대비, 15 s 전체): `mrstft` 다중 해상도 STFT 거리, `band_db` 1/3옥타브 장기 스펙트럼 dB 차(톤),
   `rms_db` 레벨 차, `win_rand` pred가 rand보다 가까운 비율. `di_*`는 이펙트 없는 DI와의 거리(참고).
 - 결과: `summary.json`, `scores.csv`(샘플별), `audio/<id>_{pred,rand,gt}.flac`(target은 dataset의 `targets/`).
+- `summary.json`의 `per_effect`: 이펙트별 켜짐 precision/recall/F1, 노브 MAE와 같은 노브의 오디오 없는 기준선(train 중앙값).
+- testFX 체크포인트도 그대로 넣으면 됨 (`model_kind`로 구분). GPU에서 `predict`만 하고 데스크톱에서 `render`부터 이어서 해도 됨.
+- **모델 비교** `compare --runs ft_v1=eval_render/ft_v1 ft_full=eval_render/ft_full ...`: 같은 샘플 기준으로
+  `compare.md`(전체 / 이펙트별 / 모델 간 승률 표), `compare.html`(DI · target · 모델별 예측을 한 카드에서 듣기).
 - **듣기 페이지** `listen.html` (`all`의 마지막 단계, 따로는 `listen --k 5`): 샘플마다 원본 DI / target / 예측 렌더 플레이어,
   정답·예측 체인 비교(빠진 이펙트 / 추가된 이펙트 표시), 노브별 정답·예측·오차 표. 기본 5개를 소리 거리 기준으로
   잘 맞춘 것부터 못 맞춘 것까지 고르게 뽑음(`--pick spread|random|first`). 오디오는 `listen/`에 복사돼서 폴더째 옮겨도 열림.

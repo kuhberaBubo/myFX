@@ -115,16 +115,40 @@ def cmd_predict(a) -> None:
     root = Path(a.root)
 
     ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
-    tok = RigTokenizer.from_checkpoint(ck["tokenizer"])
-    model = build_model(ck["args"], tok.vocab_size, dropout=0.0)
-    model.load_state_dict(ck["model_state_dict"])
-    model.to(a.device).eval()
     dc = ck["config"]["data"]
-    ds = RigPairDataset(root, a.split_file, tok, sample_rate=dc["sample_rate"],
-                        clip_start_sec=dc["clip_start_sec"], clip_duration=dc["clip_duration"],
-                        dummy_level_db=dc["dummy_level_db"],
-                        skip_missing_audio=a.skip_missing_audio,
-                        seed=ck["config"]["train"]["seed"])
+    if ck.get("model_kind") == "testfx":                    # testFx/ (swappable encoder)
+        sys.path.insert(0, str(HERE.parent / "testFx"))
+        from tfx_data import PairDataset
+        from tfx_data import make_loader as tfx_loader
+        from tfx_model import load_testfx
+        model, tok = load_testfx(ck, a.device)
+        ds = PairDataset(root, a.split_file, tok, sample_rate=dc["sample_rate"],
+                         clip_start_sec=dc["clip_start_sec"], clip_duration=dc["clip_duration"],
+                         skip_missing_audio=a.skip_missing_audio)
+
+        def generate(batch):
+            return model.generate(batch["dry"].to(a.device), batch["wet"].to(a.device),
+                                  dc["max_seq_len"], tok.bos_token_idx, tok.eos_token_idx)
+        loader_fn = tfx_loader
+    else:                                                   # ft_stemfx (StemFX 4-stem)
+        tok = RigTokenizer.from_checkpoint(ck["tokenizer"])
+        model = build_model(ck["args"], tok.vocab_size, dropout=0.0)
+        model.load_state_dict(ck["model_state_dict"])
+        model.to(a.device).eval()
+        ds = RigPairDataset(root, a.split_file, tok, sample_rate=dc["sample_rate"],
+                            clip_start_sec=dc["clip_start_sec"], clip_duration=dc["clip_duration"],
+                            dummy_level_db=dc["dummy_level_db"],
+                            skip_missing_audio=a.skip_missing_audio,
+                            seed=ck["config"]["train"]["seed"])
+
+        def generate(batch):
+            orig = {k: v.to(a.device) for k, v in batch["original_stems"].items()}
+            aug = {k: v.to(a.device) for k, v in batch["augmented_stems"].items()}
+            return model.generate(orig, aug, max_length=dc["max_seq_len"],
+                                  bos_token_idx=tok.bos_token_idx,
+                                  eos_token_idx=tok.eos_token_idx, top_k=1, top_p=1.0)[0]
+        loader_fn = make_loader
+    del ck
 
     # random but fixed subset; each sample gets another sample's chain as baseline
     rng = random.Random(a.seed)
@@ -139,17 +163,13 @@ def cmd_predict(a) -> None:
     if not todo:
         return
     ds.rows = todo
-    loader = make_loader(ds, a.batch_size, False, 0)
+    loader = loader_fn(ds, a.batch_size, False, 0)
     by_id = {r["id"]: r for r in todo}
 
     t0, n = time.time(), 0
     for batch in loader:
-        orig = {k: v.to(a.device) for k, v in batch["original_stems"].items()}
-        aug = {k: v.to(a.device) for k, v in batch["augmented_stems"].items()}
         with torch.no_grad():
-            gen, _ = model.generate(orig, aug, max_length=dc["max_seq_len"],
-                                    bos_token_idx=tok.bos_token_idx,
-                                    eos_token_idx=tok.eos_token_idx, top_k=1, top_p=1.0)
+            gen = generate(batch)
         for sid, seq in zip(batch["ids"], gen.cpu().tolist()):
             row, other = by_id[sid], partner[sid]
             pred, true = tok.decode(seq), tok.target_from_row(row)
@@ -299,6 +319,39 @@ def audio_dist(ref: np.ndarray, est: np.ndarray, sr: int) -> dict:
             "rms_db": abs(rms_db(ref) - rms_db(est))}
 
 
+def effect_breakdown(root: Path, preds: list[dict]) -> dict:
+    """Per effect: presence precision/recall/F1, knob MAE (raw 0-1) on knobs present
+    in both, and the audio-free baseline for the same knobs (train median)."""
+    from rig_tokenizer import RACK, RigTokenizer
+    tok = RigTokenizer(root / "param_info")
+    train = [json.loads(l) for l in open(root / "train.jsonl", encoding="utf-8") if l.strip()]
+    vals: dict = {}
+    for r in train:
+        for k, v in tok.target_from_row(r)["params"].items():
+            vals.setdefault(k, []).append(v)
+    med = {k: float(np.median(v)) for k, v in vals.items()}
+    out = {}
+    for e in [x for x in tok.effect_tokens if x != RACK] + [RACK]:
+        tp = sum(e in p["effects_true"] and e in p["effects_pred"] for p in preds)
+        fp = sum(e not in p["effects_true"] and e in p["effects_pred"] for p in preds)
+        fn = sum(e in p["effects_true"] and e not in p["effects_pred"] for p in preds)
+        err, base = [], []
+        for p in preds:
+            for k, t in p["params_true"].items():
+                if tok.specs[k]["component"] == e and k in p["params_pred"]:
+                    err.append(abs(p["params_pred"][k] - t))
+                    base.append(abs(med.get(k, 0.5) - t))
+        if tp + fp + fn == 0:
+            continue
+        out[e] = {"n_true": tp + fn, "precision": round(tp / max(tp + fp, 1), 3),
+                  "recall": round(tp / max(tp + fn, 1), 3),
+                  "f1": round(2 * tp / max(2 * tp + fp + fn, 1), 3),
+                  "knob_mae": round(float(np.mean(err)), 4) if err else None,
+                  "knob_mae_baseline": round(float(np.mean(base)), 4) if base else None,
+                  "n_knobs": len(err)}
+    return out
+
+
 def _mono(path: Path) -> tuple[np.ndarray, int]:
     x, sr = sf.read(path, dtype="float32", always_2d=True)
     return x.mean(axis=1), sr
@@ -344,6 +397,7 @@ def cmd_score(a) -> None:
         return round(float(np.mean(v)), 4) if v else None
 
     rendered = [r for r in per if "pred_mrstft" in r]
+    per_effect = effect_breakdown(root, list(preds.values()))
     summary = {
         "n_predicted": len(per), "n_rendered": len(rendered),
         "chain": {k: mean(k) for k in ("chain_exact", "effect_f1", "effect_acc", "order_ok",
@@ -353,6 +407,7 @@ def cmd_score(a) -> None:
                   for kind in ("pred", "rand", "di") for k in ("mrstft", "band_db", "rms_db")},
         "win_rand": mean("win_rand", rendered),
         "gt_check": {k: mean(f"gt_{k}") for k in ("mrstft", "band_db", "rms_db")},
+        "per_effect": per_effect,
     }
     if rendered:
         summary["audio_by_chain_exact"] = {
@@ -536,6 +591,189 @@ def cmd_listen(a) -> None:
     print(f"-> {out / 'listen.html'}  ({len(picked)} samples)")
 
 
+# =========================================================================== compare
+def cmd_compare(a) -> None:
+    """Several eval folders (same --root, same --seed/--n -> same samples) side by side."""
+    import html
+    import shutil
+
+    from rig_normalization import raw_to_value
+    from rig_tokenizer import RACK, RigTokenizer
+
+    out, root = Path(a.out), Path(a.root)
+    (out / "listen").mkdir(parents=True, exist_ok=True)
+    runs = []
+    for spec in a.runs:
+        name, d = spec.split("=", 1) if "=" in spec else (Path(spec).name, spec)
+        d = Path(d)
+        if not (d / "summary.json").is_file():
+            raise SystemExit(f"{d}/summary.json missing: run `score` (or `all`) there first")
+        sm = json.loads((d / "summary.json").read_text(encoding="utf-8"))
+        with open(d / "scores.csv", encoding="utf-8-sig") as f:
+            sc = {r["id"]: r for r in csv.DictReader(f)}
+        rd = {}
+        for r in _read_jsonl(d / RENDERS):
+            rd.setdefault(r["id"], {})[r["kind"]] = r
+        runs.append({"name": name, "dir": d, "summary": sm, "scores": sc, "renders": rd,
+                     "preds": {p["id"]: p for p in _read_jsonl(d / PREDS)}})
+    names = [r["name"] for r in runs]
+    common = sorted(set.intersection(*[{i for i, s in r["scores"].items() if s.get("pred_mrstft")}
+                                       for r in runs]))
+    common_pred = sorted(set.intersection(*[set(r["preds"]) for r in runs]))
+    audio = bool(common)
+    print(f"{len(runs)} runs, {len(common_pred)} samples predicted by all, {len(common)} rendered by all"
+          + ("" if audio else " -> chain/knob tables only (run `render` + `score` for audio)"))
+
+    f = lambda v, d=3: "—" if v is None else f"{v:.{d}f}"  # noqa: E731
+    md = ["# 모델 비교", "",
+          f"공통 샘플: 예측 {len(common_pred)}개, 렌더 {len(common)}개 (같은 val 샘플, 같은 기준선 체인)"
+          + ("" if audio else " · 렌더 전이라 소리 지표는 비어 있음"), "",
+          "## 전체", "",
+          "| 지표 | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
+    rows = [("체인 완전 일치", "chain", "chain_exact"), ("이펙트 F1", "chain", "effect_f1"),
+            ("순서 일치(공통 이펙트)", "chain", "order_ok"), ("노브 MAE (0~1)", "chain", "param_mae"),
+            ("on/off·선택 정확도", "chain", "discrete_acc"), ("노브 재현율", "chain", "param_recall"),
+            ("소리 거리 mrstft (예측)", "audio", "pred_mrstft"),
+            ("소리 거리 mrstft (기준선 체인)", "audio", "rand_mrstft"),
+            ("톤 차 band dB (예측)", "audio", "pred_band_db"), ("레벨 차 dB (예측)", "audio", "pred_rms_db"),
+            ("기준선보다 가까운 비율", None, "win_rand")]
+    for label, grp, key in rows:
+        vals = [(r["summary"].get(grp, {}) if grp else r["summary"]).get(key) for r in runs]
+        md.append(f"| {label} | " + " | ".join(f(v) for v in vals) + " |")
+
+    effects = sorted({e for r in runs for e in r["summary"].get("per_effect", {})},
+                     key=lambda e: (e == RACK, e))
+    md += ["", "## 이펙트별 (켜짐 F1 / 노브 MAE, 기준선 = 오디오 없이 train 중앙값)", "",
+           "| 이펙트 | " + " | ".join(f"{n} F1" for n in names) + " | "
+           + " | ".join(f"{n} 노브" for n in names) + " | 기준선 노브 |",
+           "|---|" + "---|" * (2 * len(names) + 1)]
+    for e in effects:
+        pe = [r["summary"].get("per_effect", {}).get(e, {}) for r in runs]
+        base = next((p.get("knob_mae_baseline") for p in pe if p.get("knob_mae_baseline")), None)
+        md.append(f"| {e} | " + " | ".join(f(p.get("f1")) for p in pe) + " | "
+                  + " | ".join(f(p.get("knob_mae")) for p in pe) + f" | {f(base)} |")
+
+    def pair_table(title, key, ids):
+        lines = ["", title, "", "| | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
+        res = {}
+        for r1 in runs:
+            cells = []
+            for r2 in runs:
+                if r1 is r2:
+                    cells.append("—")
+                    continue
+                pairs = [(r1["scores"][i].get(key), r2["scores"][i].get(key)) for i in ids]
+                pairs = [(float(x), float(y)) for x, y in pairs if x not in (None, "") and y not in (None, "")]
+                w = float(np.mean([x < y for x, y in pairs])) if pairs else float("nan")
+                res[f"{r1['name']}>{r2['name']}"] = w
+                cells.append(f"{w:.2f}")
+            lines.append(f"| {r1['name']} | " + " | ".join(cells) + " |")
+        return lines, res
+
+    lines, knob_wins = pair_table("## 같은 샘플에서 노브 오차가 더 작은 비율 (행 모델이 열 모델을 이긴 비율)",
+                                  "param_mae", common_pred)
+    md += lines
+    md += ["", "## 같은 샘플에서 소리가 더 가까운 비율 (행 모델이 열 모델을 이긴 비율, mrstft)", "",
+           "| | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
+    wins = {}
+    for r1 in runs if audio else []:
+        cells = []
+        for r2 in runs:
+            if r1 is r2:
+                cells.append("—")
+                continue
+            w = np.mean([float(r1["scores"][i]["pred_mrstft"]) < float(r2["scores"][i]["pred_mrstft"])
+                         for i in common]) if common else float("nan")
+            wins[f"{r1['name']}>{r2['name']}"] = float(w)
+            cells.append(f"{w:.2f}")
+        md.append(f"| {r1['name']} | " + " | ".join(cells) + " |")
+    if not audio:
+        md.append("| (렌더 후 채워짐) |" + " |" * len(names))
+    (out / "compare.md").write_text("\n".join(md) + "\n", encoding="utf-8")
+    (out / "compare.json").write_text(json.dumps(
+        {"runs": {r["name"]: r["summary"] for r in runs}, "pairwise_win": wins,
+         "pairwise_win_knob": knob_wins, "n_common": len(common),
+         "n_common_pred": len(common_pred)}, indent=1), encoding="utf-8")
+
+    # ---- listening page: same samples, every model
+    if audio:
+        avg = {i: np.mean([float(r["scores"][i]["pred_mrstft"]) for r in runs]) for i in common}
+    else:      # before rendering: spread by mean knob error instead of sound distance
+        avg = {i: np.mean([float(r["scores"][i]["param_mae"] or 1.0) for r in runs]) for i in common_pred}
+    pick = _pick([{"id": i, "pred_mrstft": avg[i]} for i in avg], a.k, a.pick, a.seed)
+    tok = RigTokenizer(root / "param_info")
+    p0 = runs[0]["preds"]
+
+    def copy(src, name):
+        dst = out / "listen" / name
+        if not dst.is_file():
+            shutil.copyfile(src, dst)
+        return f"listen/{dst.name}"
+
+    def val(k, raw):
+        v = raw_to_value(tok.specs[k], raw)
+        return f"{round(v, 2):g}" if isinstance(v, float) else html.escape(str(v))
+
+    cards = []
+    for n, s in enumerate(pick, 1):
+        sid = s["id"]
+        base = p0[sid]
+        te, pt = base["effects_true"], base["params_true"]
+        players = [f'<div>원본 DI<audio controls preload="none" src="{copy(root / base["input"], f"{sid}_input.flac")}"></audio></div>',
+                   f'<div>정답 target<audio controls preload="none" src="{copy(root / base["target"], f"{sid}_target.flac")}"></audio></div>']
+        chains = [f'<div class="chain"><b>정답</b>' + '<span class="arrow">→</span>'.join(
+            f'<span class="chip both">{html.escape(e)}</span>' for e in te if e != RACK) + "</div>"]
+        stats = []
+        for r in runs:
+            p = r["preds"][sid]
+            if audio:
+                src = r["dir"] / r["renders"][sid]["pred"]["path"]
+                players.append(f'<div>{html.escape(r["name"])}<audio controls preload="none" '
+                               f'src="{copy(src, f"{sid}_{r["name"]}.flac")}"></audio></div>')
+            chips = [f'<span class="chip {"both" if e in te else "extra"}">{html.escape(e)}</span>'
+                     for e in p["effects_pred"] if e != RACK]
+            miss = [f'<span class="chip miss">{html.escape(e)}</span>' for e in te
+                    if e != RACK and e not in p["effects_pred"]]
+            chains.append(f'<div class="chain"><b>{html.escape(r["name"])}</b>'
+                          + '<span class="arrow">→</span>'.join(chips) + " " + " ".join(miss) + "</div>")
+            sc = r["scores"][sid]
+            stats.append(f'<span>{html.escape(r["name"])}: 이펙트 F1 <b>{float(sc["effect_f1"]):.2f}</b>, '
+                         f'노브 오차 <b>{f(float(sc["param_mae"]) if sc.get("param_mae") else None, 2)}</b>'
+                         + (f', mrstft <b>{float(sc["pred_mrstft"]):.2f}</b>' if audio else "")
+                         + '</span>')
+        rows = []
+        for e in te:
+            for i, k in enumerate([k for k in pt if tok.specs[k]["component"] == e]):
+                cells = []
+                for r in runs:
+                    pp = r["preds"][sid]["params_pred"]
+                    if k in pp:
+                        d = abs(pp[k] - pt[k])
+                        cls = "g" if d < 0.1 else ("y" if d < 0.3 else "r")
+                        cells.append(f'<td class="num {cls}">{val(k, pp[k])}</td>')
+                    else:
+                        cells.append('<td class="num r">없음</td>')
+                rows.append(f'<tr><td class="fx">{html.escape(e) if i == 0 else ""}</td>'
+                            f'<td>{html.escape(k.split(e + "_", 1)[-1])}</td>'
+                            f'<td class="num">{val(k, pt[k])}</td>{"".join(cells)}</tr>')
+        head = "".join(f"<th>{html.escape(nm)}</th>" for nm in names)
+        cards.append(f"""<section class="card"><div class="head"><h2>{n}. {html.escape(sid)}</h2>
+ <span class="tag">프리셋 {html.escape(base['preset_true'])}</span></div>
+ <div class="players">{''.join(players)}</div>{''.join(chains)}
+ <div class="stats">{''.join(stats)}</div>
+ <details><summary>노브 비교 (색: 정답과의 raw 오차 &lt;0.1 / &lt;0.3 / ≥0.3)</summary>
+ <table><tr><th>이펙트</th><th>노브</th><th>정답</th>{head}</tr>{''.join(rows)}</table></details></section>""")
+    page = f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>모델 비교 듣기</title>
+<style>{LISTEN_CSS}</style></head><body><main><h1>모델 비교 듣기</h1>
+<p class="sub">{len(pick)}개 샘플 · 모델: {', '.join(html.escape(n) for n in names)} · 전체 표는 compare.md</p>
+<p class="legend"><span class="chip both">정답에 있음</span> <span class="chip extra">예측에만 있음</span>
+ <span class="chip miss">예측에서 빠짐</span></p>{''.join(cards)}</main></body></html>"""
+    (out / "compare.html").write_text(page, encoding="utf-8")
+    print("\n".join(md))
+    print(f"-> {out / 'compare.md'}, {out / 'compare.html'}")
+
+
 # ============================================================================== main
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -573,7 +811,17 @@ def main():
         common(p)
         for f in extra:
             f(p)
+    p = sub.add_parser("compare", help="several eval folders side by side")
+    common(p)
+    p.add_argument("--runs", nargs="+", required=True, help="name=eval_dir ...")
+    listen_args(p)
     a = ap.parse_args()
+    try:                                        # Windows console (cp949) vs Korean / dashes
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+    if a.cmd == "compare":
+        return cmd_compare(a)
     if a.cmd in ("predict", "all"):
         cmd_predict(a)
     if a.cmd in ("render", "all"):

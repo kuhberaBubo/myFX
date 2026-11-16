@@ -45,3 +45,8 @@ train:
   device: cuda
   resume: auto                # auto | null | path/to/checkpoint.pt
   seed: 42
+  amp: auto                   # auto: bf16 autocast if the GPU supports it (L4/A100), else off | none
+  cache_embeddings: false     # frozen-throughout runs only: encode once, train the decoder on the cache
+  best_metric: loss           # val metric for best_checkpoint / early stop (loss | mae_val), lower = better
+  early_stop_patience: null   # stop after N epochs without improvement (null = off)
+  early_stop_min_delta: 0.0

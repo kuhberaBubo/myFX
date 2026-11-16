@@ -1,0 +1,56 @@
+# testFX-MERT: MERT-v1-95M encoder (top layers trained, rest frozen),
+# StemFX decoder warm-started from the paper checkpoint.
+# Needs: pip install transformers nnAudio
+#
+#   python testFx/train_tfx.py --config testFx/configs/tfx_mert.yaml \
+#       data.root=/content/run_20k \
+#       train.checkpoint_dir=/content/drive/MyDrive/myFX/ckpt/tfx_mert \
+#       train.log_dir=/content/drive/MyDrive/myFX/logs/tfx_mert
+
+data:
+  root: null
+  train_file: train.jsonl
+  val_file: val.jsonl
+  sample_rate: 44100
+  clip_start_sec: 0.0
+  clip_duration: 15.0         # 3 x 5 s MERT chunks
+  max_seq_len: 512
+  num_workers: 2
+  max_train_samples: null
+  max_val_samples: null
+  skip_missing_audio: false
+
+model:
+  pretrained_checkpoint: null
+  decoder_init: stemfx
+  memory_gate_init: 0.1       # memory = gate * LayerNorm(encoder out); small start, learnable (see tfx_model.TestFX)
+  dropout: 0.1
+  encoder:
+    kind: mert
+    trainable_layers: 4       # top 4 of 12 transformer layers trained, the rest frozen
+    chunk_sec: 5.0            # MERT was trained on 5 s context
+    memory_time_pool: 15      # 75 Hz -> 5 tokens/s per stream (dry, wet, wet - dry)
+
+train:
+  batch_size: 16
+  num_epochs: 30
+  learning_rate: 1.0e-4       # decoder
+  new_lr_multiplier: 3.0      # projections / layer weights -> 3e-4
+  pretrained_encoder_lr_multiplier: 0.1   # MERT top layers -> 1e-5
+  weight_decay: 0.01
+  clip_grad_norm: 1.0
+  warmup_steps: 1000
+  gradient_accumulation_steps: 1
+  lambda_mse: 20.0
+  no_value_head: true
+  log_dir: logs/tfx_mert
+  checkpoint_dir: checkpoints/tfx_mert
+  log_interval: 50
+  save_interval: 1000          # no numbered snapshots (Drive space); latest + best only
+  device: cuda
+  resume: auto
+  seed: 42
+  amp: auto
+  best_metric: loss
+  early_stop_patience: 3
+  early_stop_min_delta: 0.001
