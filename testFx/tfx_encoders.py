@@ -189,14 +189,39 @@ class MERTEncoder(nn.Module, _MemoryMixin):
             layer.train(mode)
         return self
 
+    def _hidden_states(self, chunks):
+        """Input to the first transformer layer + every layer's output (L+1 tensors).
+        MERT's remote code returns hidden_states=None under transformers 5.x, so the
+        layers are tapped with hooks when the output does not carry them."""
+        layers, taps = self.mert.encoder.layers, []
+
+        def pre(_m, args, kwargs):
+            taps.append(args[0] if args else kwargs["hidden_states"])
+
+        def post(_m, _a, o):
+            taps.append(o[0] if isinstance(o, (tuple, list)) else o)
+
+        hooks = [layers[0].register_forward_pre_hook(pre, with_kwargs=True)]
+        hooks += [layer.register_forward_hook(post) for layer in layers]
+        try:
+            out = self.mert(chunks, output_hidden_states=True)
+        finally:
+            for h in hooks:
+                h.remove()
+        hs = getattr(out, "hidden_states", None)
+        if hs is not None:
+            return list(hs)
+        if len(taps) != len(layers) + 1:
+            raise RuntimeError(f"MERT hooks caught {len(taps)} states, expected {len(layers) + 1}")
+        return taps
+
     def _embed(self, x):
         """x (B, N) at 24 kHz, already scaled -> (B, frames, dim)"""
         B, N = x.shape
         c = int(self.chunk_sec * self.mert_sr)
         n = max(1, N // c)
         chunks = x[:, :n * c].reshape(B * n, c)
-        out = self.mert(chunks, output_hidden_states=True)
-        hs = torch.stack(out.hidden_states, 0)                   # (L+1, B*n, T, dim)
+        hs = torch.stack(self._hidden_states(chunks), 0)         # (L+1, B*n, T, dim)
         w = torch.softmax(self.layer_w, 0).to(hs.dtype)
         h = (w[:, None, None, None] * hs).sum(0)
         return h.reshape(B, -1, h.size(-1))
